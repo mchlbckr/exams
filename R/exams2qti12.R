@@ -964,11 +964,22 @@ make_itembody_qti12 <- function(rtiming = FALSE, shuffle = FALSE, rshuffle = shu
     }
 
 ## scoring/solution display for the correct answers
-    ## ILIAS 9.x BUGFIX: Skip complex boolean XML if ILIAS and partial grading are active
     is_ilias <- exists("flavor") && flavor == "ilias"
 
     if(!multiple_dropdowns) {
-      if(!(is_ilias && eval$partial)) {
+      if(is_ilias && x$metainfo$type == "schoice") {
+        ## FIX A: ILIAS 9.x schoice (Simple Additive Logic, no complex booleans)
+        xml <- c(xml,
+          '<respcondition title="Mastery" continue="Yes">',
+          '<conditionvar>',
+          unlist(correct_answers),
+          '</conditionvar>',
+          paste('<setvar varname="SCORE" action="Add">', points, '</setvar>', sep = ''),
+          '<displayfeedback feedbacktype="Response" linkrefid="Mastery"/>',
+          '</respcondition>'
+        )
+      } else if(!(is_ilias && eval$partial)) {
+        ## FIX B: Standard QTI logic (bypassed if ILIAS mchoice with partial=TRUE)
         xml <- c(xml,
           paste('<respcondition title="Mastery"', if(canvas) 'continue="No">' else ' continue="Yes">'),
           '<conditionvar>',
