@@ -964,7 +964,8 @@ make_itembody_qti12 <- function(rtiming = FALSE, shuffle = FALSE, rshuffle = shu
     }
 
 ## scoring/solution display for the correct answers
-    is_ilias <- exists("flavor") && flavor == "ilias"
+    ## REFINED FIREWALL: More robust check for ILIAS flavor
+    is_ilias <- identical(flavor, "ilias")
 
     if(!multiple_dropdowns) {
       if(is_ilias && x$metainfo$type == "schoice") {
@@ -1054,7 +1055,7 @@ make_itembody_qti12 <- function(rtiming = FALSE, shuffle = FALSE, rshuffle = shu
                 '</respcondition>'
               )
             }
-          } else {
+          } else if (!is_ilias) {  ## FIX C: Skip empty, schema-breaking XML blocks for ILIAS
             xml <- c(xml,
               '<respcondition continue="Yes" title="Mastery">',
               '<conditionvar>',
@@ -1109,7 +1110,7 @@ make_itembody_qti12 <- function(rtiming = FALSE, shuffle = FALSE, rshuffle = shu
     }
 
     if(!canvas) {
-      if(!(is_ilias && eval$partial)) {
+      if(!(is_ilias && eval$partial)) {  ## FIX B (continued): Zombie Logic Firewall for Fail block
           xml <- c(xml,
             '<respcondition title="Fail" continue="Yes">',
             '<conditionvar>',
@@ -1160,7 +1161,6 @@ make_itembody_qti12 <- function(rtiming = FALSE, shuffle = FALSE, rshuffle = shu
     xml
   }
 }
-
 
 ## function to create identfier ids
 make_id <- function(size, n = 1L) {
