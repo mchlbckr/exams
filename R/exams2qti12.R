@@ -963,35 +963,40 @@ make_itembody_qti12 <- function(rtiming = FALSE, shuffle = FALSE, rshuffle = shu
       }
     }
 
-    ## scoring/solution display for the correct answers
-    if(!multiple_dropdowns) {
-      xml <- c(xml,
-        paste('<respcondition title="Mastery"', if(canvas) 'continue="No">' else ' continue="Yes">'),
-        '<conditionvar>',
-        if(!is.null(correct_answers) & (length(correct_answers) > 1 | grepl("choice", x$metainfo$type))) '<and>' else NULL
-      )
+## scoring/solution display for the correct answers
+    ## ILIAS 9.x BUGFIX: Skip complex boolean XML if ILIAS and partial grading are active
+    is_ilias <- exists("flavor") && flavor == "ilias"
 
-      xml <- c(xml,
-        unlist(correct_answers),
-        if(!is.null(correct_answers) & (length(correct_answers) > 1 | grepl("choice", x$metainfo$type))) {
-            if(canvas) NULL else '</and>'
-          } else { NULL },
-        if(!is.null(wrong_answers)) {
-          if(canvas) {
-            c(paste('<not>', unlist(wrong_answers), '</not>'), '</and>')
+    if(!multiple_dropdowns) {
+      if(!(is_ilias && eval$partial)) {
+        xml <- c(xml,
+          paste('<respcondition title="Mastery"', if(canvas) 'continue="No">' else ' continue="Yes">'),
+          '<conditionvar>',
+          if(!is.null(correct_answers) & (length(correct_answers) > 1 | grepl("choice", x$metainfo$type))) '<and>' else NULL
+        )
+
+        xml <- c(xml,
+          unlist(correct_answers),
+          if(!is.null(correct_answers) & (length(correct_answers) > 1 | grepl("choice", x$metainfo$type))) {
+              if(canvas) NULL else '</and>'
+            } else { NULL },
+          if(!is.null(wrong_answers)) {
+            if(canvas) {
+              c(paste('<not>', unlist(wrong_answers), '</not>'), '</and>')
+            } else {
+              c('<not>', '<or>', unlist(wrong_answers), '</or>', '</not>')
+            }
           } else {
-            c('<not>', '<or>', unlist(wrong_answers), '</or>', '</not>')
-          }
-        } else {
-          NULL
-        },
-        '</conditionvar>',
-        if(!eval$partial) {
-          paste('<setvar varname="SCORE" action="Set">', points, '</setvar>', sep = '')
-        } else NULL,
-        paste('<displayfeedback feedbacktype="Response"', if(canvas) 'linkrefid="correct_fb"/>' else 'linkrefid="Mastery"/>'),
-        '</respcondition>'
-      )
+            NULL
+          },
+          '</conditionvar>',
+          if(!eval$partial) {
+            paste('<setvar varname="SCORE" action="Set">', points, '</setvar>', sep = '')
+          } else NULL,
+          paste('<displayfeedback feedbacktype="Response"', if(canvas) 'linkrefid="correct_fb"/>' else 'linkrefid="Mastery"/>'),
+          '</respcondition>'
+        )
+      }
     } else {
       for(i in seq_along(correct_answers)) {
         xml <- c(xml,
@@ -1093,25 +1098,27 @@ make_itembody_qti12 <- function(rtiming = FALSE, shuffle = FALSE, rshuffle = shu
     }
 
     if(!canvas) {
-      xml <- c(xml,
-        '<respcondition title="Fail" continue="Yes">',
-        '<conditionvar>',
-        if(!is.null(wrong_answers)) NULL else '<not>',
-        if(is.null(wrong_answers)) {
-          c(if(length(correct_answers) > 1) '<and>' else NULL,
-            correct_answers,
-            if(length(correct_answers) > 1) '</and>' else NULL)
-        } else {
-          c('<or>', wrong_answers, '</or>')
-        },
-        if(!is.null(wrong_answers)) NULL else '</not>',
-        '</conditionvar>',
-        if(!eval$partial & !is.na(minvalue)) {
-          paste('<setvar varname="SCORE" action="Set">', minvalue, '</setvar>', sep = '')
-        } else NULL,
-        '<displayfeedback feedbacktype="Solution" linkrefid="Solution"/>',
-        '</respcondition>'
-      )
+      if(!(is_ilias && eval$partial)) {
+          xml <- c(xml,
+            '<respcondition title="Fail" continue="Yes">',
+            '<conditionvar>',
+            if(!is.null(wrong_answers)) NULL else '<not>',
+            if(is.null(wrong_answers)) {
+              c(if(length(correct_answers) > 1) '<and>' else NULL,
+                correct_answers,
+                if(length(correct_answers) > 1) '</and>' else NULL)
+            } else {
+              c('<or>', wrong_answers, '</or>')
+            },
+            if(!is.null(wrong_answers)) NULL else '</not>',
+            '</conditionvar>',
+            if(!eval$partial & !is.na(minvalue)) {
+              paste('<setvar varname="SCORE" action="Set">', minvalue, '</setvar>', sep = '')
+            } else NULL,
+            '<displayfeedback feedbacktype="Solution" linkrefid="Solution"/>',
+            '</respcondition>'
+          )
+      }
 
       ## handle all other cases
       xml <- c(xml,
@@ -1123,7 +1130,7 @@ make_itembody_qti12 <- function(rtiming = FALSE, shuffle = FALSE, rshuffle = shu
         '<displayfeedback feedbacktype="Solution" linkrefid="Solution"/>',
         '</respcondition>'
       )
-    } else{
+    } else {
       xml <- c(xml,
         '<respcondition continue="Yes">',
         '<conditionvar>',
@@ -1133,16 +1140,6 @@ make_itembody_qti12 <- function(rtiming = FALSE, shuffle = FALSE, rshuffle = shu
         '</respcondition>'
       )
     }
-
-    ## handle unanswered cases
-#    xml <- c(xml,
-#      '<respcondition title="Fail" continue="Yes">',
-#      '<conditionvar>',
-#      '<unanswered/>',
-#      '</conditionvar>',
-#      '<setvar varname="SCORE" action="Set">0</setvar>',
-#      '</respcondition>'
-#    )
 
     ## end of response processing
     xml <- c(xml, '</resprocessing>')
