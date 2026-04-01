@@ -1,675 +1,1066 @@
-exams2ilias <- function(file, n = 1L, nsamp = NULL, dir = ".",
-  name = NULL, quiet = TRUE, edir = NULL, tdir = NULL, sdir = NULL, verbose = FALSE,
+## create IMS QTI 1.2 .xml files
+## specifications and examples available at:
+## http://www.imsglobal.org/question/qtiv1p2/imsqti_asi_bindv1p2.html
+## http://www.imsglobal.org/question/qtiv1p2/imsqti_asi_bestv1p2.html#1466669
+exams2qti12 <- function(file, n = 1L, nsamp = NULL, dir = ".",
+  name = NULL, quiet = TRUE, edir = NULL, tdir = NULL, sdir = NULL, verbose = FALSE, rds = FALSE, seed = NULL,
   resolution = 100, width = 4, height = 4, svg = FALSE, encoding  = "UTF-8",
-  num = list(fix_num = FALSE, minvalue = NA),
-  mchoice = list(maxchars = c(3, NA, 3), minvalue = NA),
-  schoice = mchoice, string = NULL, cloze = NULL,
-  template = "ilias",
+  num = NULL, mchoice = NULL, schoice = mchoice, string = NULL, cloze = NULL,
+  template = "qti12",
   duration = NULL, stitle = "Exercise", ititle = "Question",
   adescription = "Please solve the following exercises.",
   sdescription = "Please answer the following question.",
-  maxattempts = 0, cutvalue = 0, solutionswitch = TRUE, zip = TRUE,
-  points = NULL, eval = list(partial = TRUE, negative = FALSE),
-  converter = "pandoc-mathjax", xmlcollapse = TRUE,
-  metasolution = FALSE, ...)
+  maxattempts = 1, cutvalue = 0, solutionswitch = TRUE, zip = TRUE,
+  points = NULL, eval = list(partial = TRUE, rule = "false2", negative = FALSE),
+  converter = NULL, envir = NULL, engine = NULL, xmlcollapse = FALSE,
+  flavor = c("plain", "openolat", "canvas", "ilias"), ...)
 {
-  ## assure a certain processing of items for ILIAS
-  if(is.null(num)) {
-    num <- list(fix_num = FALSE, minvalue = NA)
+  ## which qti flavor
+  flavor <- match.arg(flavor, c("plain", "openolat", "canvas", "ilias"))
+
+  ## Canvas?
+  canvas <- flavor == "canvas"
+  if(canvas) {
+    if(!eval$partial | eval$negative)
+      warning("the current supported evaluation policy for Canvas is partial = TRUE and negative = FALSE, will be overwritten!")
+    eval <- list(partial = TRUE, rule = eval$rule, negative = FALSE)
+  }
+
+  if(flavor == "openolat") {
+    if(is.null(converter)) converter <- "pandoc-mathjax"
+    ## post-process mathjax output for display in OpenOlat
+    .exams_set_internal(pandoc_mathjax_fixup = "openolat")
+    on.exit(.exams_set_internal(pandoc_mathjax_fixup = FALSE))
+  }
+
+  ## default converter is "ttm" if all exercises are Rnw, otherwise "pandoc"
+  if(is.null(converter)) {
+    converter <- if(any(tolower(tools::file_ext(unlist(file))) == "rmd")) "pandoc" else "ttm"
+  }
+
+  ## set up .html transformer
+  args <- list(...)
+  if(is.null(args$base64)) {
+    if(canvas) args$base64 <- FALSE
+  }
+  if(canvas) {
+    quiztype <- args$quiztype
+    if(is.null(quiztype)) quiztype <- "assignment"
+    quiztype <- match.arg(quiztype, c("assignment", "practice_quiz", "graded_survey", "survey"))
+    args$quiztype <- NULL
+  }
+  args$converter <- converter
+  htmltransform <- do.call("make_exercise_transform_html", args)
+
+  ## create a name
+  if(is.null(name)) {
+    name <- file_path_sans_ext(basename(template))
+    xmlname <- "qti"
   } else {
-    num$fix_num <- FALSE
-    num$minvalue <- NA
+    name <- gsub("\\s", "_", name)
+    if(is_number1(name))
+      name <- paste0("_", name)
+    xmlname <- name
   }
-  if(is.null(mchoice)) {
-    mchoice <- list(maxchars = c(3, NA, 3), minvalue = NA)
+  if(isTRUE(rds)) rds <- name
+
+  ## generate the exam
+  is.xexam <- FALSE
+  if(is.list(file)) {
+    if(any(grepl("exam1", names(file))))
+      is.xexam <- TRUE
+  }
+  if(!is.xexam) {
+    exm <- xexams(file, n = n, nsamp = nsamp,
+      driver = list(
+        sweave = list(quiet = quiet, pdf = FALSE, png = !svg, svg = svg,
+          resolution = resolution, width = width, height = height,
+          encoding = encoding, envir = envir, engine = engine),
+        read = NULL, transform = htmltransform, write = NULL),
+      dir = dir, edir = edir, tdir = tdir, sdir = sdir, verbose = verbose, rds = rds, seed = seed, points = points)
   } else {
-    mchoice$maxchars <- c(3, NA, 3)
-    mchoice$minvalue <- NA
-  }
-  if(is.null(schoice)) {
-    schoice <- list(maxchars = c(3, NA, 3), minvalue = NA)
-  } else {
-    schoice$maxchars <- c(3, NA, 3)
-    schoice$minvalue <- NA
+    exm <- file
+    rm(file)
   }
 
-  ## default name
-  if(is.null(name)) name <- gsub("\\.xml$", "", template)
+  ## start .xml assessement creation
+  itembody <- list(num = num, mchoice = mchoice, schoice = schoice, cloze = cloze, string = string)
 
-  ## enforce base64 encoding for "everything"
-  base64 <- .fileURI_mime_types[, "ext"]
-
-  ## create plain QTI 1.2 XML first, then rewrite it to the ILIAS pool layout
-  outdir <- file_path_as_absolute(dir)
-  dir.create(workdir <- tempfile())
-  on.exit(unlink(workdir, recursive = TRUE), add = TRUE)
-
-  maxattempts_qti12 <- maxattempts
-  maxattempts_qti12[is.infinite(maxattempts_qti12) | maxattempts_qti12 == 0] <- 1
-
-  rval <- exams2qti12(file = file, n = n, nsamp = nsamp, dir = workdir,
-    name = name, quiet = quiet, edir = edir, tdir = tdir, sdir = sdir, verbose = verbose,
-    resolution = resolution, width = width, height = height, svg = svg, encoding  = encoding,
-    num = num, mchoice = mchoice, schoice = schoice, string = string, cloze = cloze,
-    template = template,
-    duration = duration, stitle = stitle, ititle = ititle,
-    adescription = adescription, sdescription = sdescription,
-    maxattempts = maxattempts_qti12, cutvalue = cutvalue, solutionswitch = solutionswitch, zip = FALSE,
-    points = points, eval = eval, converter = converter, xmlcollapse = FALSE,
-    base64 = base64, flavor = "ilias", ...)
-
-  qti12_path <- file.path(workdir, paste0(name, ".xml"))
-  xml <- readLines(qti12_path, warn = FALSE)
-  items <- extract_qti12_items(xml)
-  exm <- ilias_flatten_exams(rval)
-  lookup <- setNames(seq_along(exm), vapply(exm, function(z) z$item$metainfo$id, character(1)))
-
-  if(length(items) != length(exm)) {
-    stop("generated item count does not match exams item count")
-  }
-  if(!all(names(items) %in% names(lookup))) {
-    stop("failed to match generated QTI items back to exercises")
-  }
-
-  prefix <- paste0(format(as.integer(Sys.time()), scientific = FALSE, trim = TRUE),
-    sprintf("%04d", sample.int(10000L, 1L) - 1L))
-  width_id <- max(1L, nchar(length(items)))
-  item_xml <- vector("list", length(items))
-  qrefs <- character(length(items))
-  pool_id <- paste0("il_0_qpl_", prefix)
-  final_maxattempts <- rep(maxattempts, length.out = length(items))
-
-  for(k in seq_along(items)) {
-    pos <- lookup[[names(items)[k]]]
-    i <- exm[[pos]]$i
-    j <- exm[[pos]]$j
-    x <- exm[[pos]]$item
-    title <- x$metainfo$name
-    if(is.null(title) || identical(title, "")) {
-      title <- ilias_extract_item_title(items[[k]])
+  for(i in c("num", "mchoice", "schoice", "cloze", "string")) {
+    if(is.null(itembody[[i]])) itembody[[i]] <- list()
+    if(is.list(itembody[[i]])) {
+      if(is.null(itembody[[i]]$eval)) itembody[[i]]$eval <- eval
+      itembody[[i]]$flavor <- flavor
+      itembody[[i]] <- do.call("make_itembody_qti12", itembody[[i]])
     }
-    item_id <- paste0("il_0_qst_", prefix, sprintf(paste0("%0", width_id, "d"), k))
-    rval[[i]][[j]]$metainfo$id <- item_id
-    qrefs[k] <- item_id
-
-    if(identical(x$metainfo$type, "cloze")) {
-      item_xml[[k]] <- make_item_ilias_cloze(items[[k]], rval[[i]][[j]], item_id, title,
-        final_maxattempts[k])
-    } else {
-      item_xml[[k]] <- patch_item_ilias(items[[k]], item_id, title,
-        ilias_question_type(x$metainfo$type), final_maxattempts[k])
-    }
+    if(!is.function(itembody[[i]])) stop(sprintf("wrong specification of %s", sQuote(i)))
   }
 
-  qti_xml <- c(
-    '<?xml version="1.0" encoding="utf-8"?>',
-    '<!DOCTYPE questestinterop SYSTEM "ims_qtiasiv1p2p1.dtd">',
-    '<questestinterop>',
-    unlist(item_xml, use.names = FALSE),
-    '</questestinterop>'
-  )
-  qti_xml <- ilias_collapse_xml(qti_xml, xmlcollapse)
+  ## create a temporary directory
+  dir <- path.expand(dir)
+  if(is.null(tdir)) {
+    dir.create(tdir <- tempfile())
+    on.exit(unlink(tdir))
+  } else {
+    tdir <- path.expand(tdir)
+  }
+  if(!file.exists(tdir)) dir.create(tdir)
+
+  ## the package directory
+  pkg_dir <- find.package("exams")
+
+  ## get the .xml template
+  template <- path.expand(template)
+  template <- ifelse(
+    tolower(substr(template, nchar(template) - 3L, nchar(template))) != ".xml",
+    paste(template, ".xml", sep = ""), template)
+  template <- ifelse(file.exists(template),
+    template, file.path(pkg_dir, "xml", basename(template)))
+  if(!all(file.exists(template))) {
+    stop(paste("The following files cannot be found: ",
+      paste(basename(template)[!file.exists(template)], collapse = ", "), ".", sep = ""))
+  }
+  xml <- readLines(template[1L])
+
+  ## check template for section and item inclusion
+  if(length(section_start <- grep("<section ident", xml, fixed = TRUE)) != 1L ||
+    length(section_end <- grep("</section>", xml, fixed = TRUE)) != 1L) {
+    stop(paste("The XML template", template,
+      "must contain exactly one opening and closing <section> tag!"))
+  }
+  section <- xml[section_start:section_end]
+  if(length(item_start <- grep("<item ident", section, fixed = TRUE)) != 1 ||
+    length(item_end <- grep("</item>", section, fixed = TRUE)) != 1) {
+    stop(paste("The XML template", template,
+      "must contain exactly one opening and closing <item> tag!"))
+  }
+  xml <- c(xml[1:(section_start - 1)], "##TestSections##", xml[(section_end + 1):length(xml)])
+  item <- section[item_start:item_end]
+  section <- section[1:(item_start - 1)]
+
+  ## obtain the number of exams and questions
+  nx <- length(exm)
+  nq <- if(!is.xexam) length(exm[[1L]]) else length(exm)
+
+  ## Canvas.
+  media_dir_name <- if(!canvas) "media" else "data"
+
+  ## function for internal ids
+  make_test_ids <- function(n, type = c("test", "section", "item"))
+  {
+    switch(type,
+      "test" = paste(name, make_id(9), sep = "_"),
+      paste(type, formatC(1:n, flag = "0", width = nchar(n)), sep = "_")
+    )
+  }
+
+  ## generate the test id
+  test_id <- make_test_ids(type = "test")
+
+  ## create section ids
+  sec_ids <- paste(test_id, make_test_ids(nq, type = "section"), sep = "_")
+
+  ## convenience function for creating integer XML tags
+  make_tag <- function(x, type, default = 1, ...) {
+    if(is.null(x)) x <- Inf
+    x <- round(as.numeric(x), ...)
+    if(x < default) {
+      warning(paste("invalid ", type, " specification, ", type, "=", default, " used", sep = ""))
+      x <- default
+    }
+    if(is.finite(x)) sprintf("%s=\"%s\"", type, x) else ""
+  }
+
+  ## create section/item titles and section description
+  if(is.null(stitle)) stitle <- ""
+  stitle <- rep(stitle, length.out = nq)
+  if(!is.null(ititle)) ititle <- rep(ititle, length.out = nq)
+  if(is.null(adescription)) adescription <- ""
+  if(is.null(sdescription)) sdescription <- ""
+  sdescription <- rep(sdescription, length.out = nq)
+
+  ## enable different maxattempts per sections
+  maxattempts <- rep(maxattempts, length.out = nq)
+
+  ## points setting
+  points <- sapply(1:nq, function(j) c(exm[[1L]][[j]]$metainfo$points, NA_real_)[1L])
+  points[is.na(points)] <- 1
+
+  ## create the directory where the test is stored
+  dir.create(test_dir <- file.path(file_path_as_absolute(tdir), name))
+
+  ## cycle through all exams and questions
+  items <- sec_xml <- NULL
+  for(j in 1:nq) {
+    ## first, create the section header
+    sec_xml <- c(sec_xml, gsub("##SectionId##", sec_ids[j], section, fixed = TRUE))
+
+    if(canvas) {
+      pos <- grep("<selection_number>", sec_xml, fixed = TRUE)[j]
+      sec_xml <- c(
+        sec_xml[1:pos],
+        '<selection_extension>',
+        paste0('<points_per_item>', sum(points[j]), '</points_per_item>'),
+        '</selection_extension>',
+        sec_xml[(pos + 1L):length(sec_xml)]
+      )
+    }
+
+    sec_xml <- gsub("##SectionTitle##", stitle[j], sec_xml, fixed = TRUE)
+    sec_xml <- gsub("##SectionDescription##", sdescription[j], sec_xml, fixed = TRUE)
+
+    if(is.xexam) nx <- length(exm[[j]])
+    item_ids <- paste(sec_ids[j], make_test_ids(nx, type = "item"), sep = "_")
+
+    for(i in 1:nx) {
+      if(is.xexam) {
+        if(i < 2) jk <- j
+        j <- i
+        i <- jk
+      }
+
+      type <- exm[[i]][[j]]$metainfo$type
+      iname <- paste(item_ids[if(is.xexam) j else i], type, sep = "_")
+      exm[[i]][[j]]$metainfo$id <- iname
+
+      ibody <- gsub("##ItemBody##",
+        paste(thebody <- itembody[[type]](exm[[i]][[j]]), collapse = "\n"),
+        item, fixed = TRUE)
+
+      enumerate <- attr(thebody, "enumerate")
+      if(is.null(enumerate)) enumerate <- FALSE
+      xsolution <- exm[[i]][[j]]$solution
+      if(!is.null(exm[[i]][[j]]$solutionlist)) {
+        if(!all(is.na(exm[[i]][[j]]$solutionlist))) {
+          xsolution <- c(xsolution, if(length(xsolution)) "<br />" else NULL)
+          xsolution <- c(xsolution, if(enumerate) '<ol type = "a">' else '<ul>')
+          if(exm[[i]][[j]]$metainfo$type == "cloze") {
+            g <- rep(seq_along(exm[[i]][[j]]$metainfo$solution), sapply(exm[[i]][[j]]$metainfo$solution, length))
+            ql <- sapply(split(exm[[i]][[j]]$questionlist, g), paste, collapse = " / ")
+            sl <- sapply(split(exm[[i]][[j]]$solutionlist, g), paste, collapse = " / ")
+          } else {
+            ql <- exm[[i]][[j]]$questionlist
+            sl <- exm[[i]][[j]]$solutionlist
+          }
+          nsol <- length(ql)
+          xsolution <- c(xsolution, paste(rep('<li>', nsol),
+            ql, if(length(exm[[i]][[j]]$solutionlist)) "<br />" else NULL,
+            sl, rep('</li>', nsol)),
+            if(enumerate) '</ol>' else '</ul>')
+        }
+      }
+
+      ibody <- gsub("##ItemSolution##", paste(xsolution, collapse = "\n"), ibody, fixed = TRUE)
+      ibody <- gsub("##ItemId##", iname, ibody, fixed = TRUE)
+
+      if(any(grepl("##QuestionType##", ibody, fixed = TRUE))) {
+        type2 <- switch(type,
+          "schoice" = "SINGLE CHOICE QUESTION",
+          "mchoice" = "MULTIPLE CHOICE QUESTION",
+          "num" = "NUMERIC QUESTION",
+          "cloze" = "CLOZE QUESTION",
+          "string" = "TEXT QUESTION" 
+        )
+        ibody <- gsub("##QuestionType##", type2, ibody, fixed = TRUE)
+      }
+
+      ibody <- gsub("##ItemTitle##",
+        if(is.null(ititle) | flavor == "ilias") exm[[i]][[j]]$metainfo$name else ititle[j],
+        ibody, fixed = TRUE)
+
+      if(length(exm[[i]][[j]]$supplements)) {
+        if(!file.exists(media_dir <- file.path(test_dir, media_dir_name))) dir.create(media_dir)
+        if(!file.exists(file.path(media_dir, sup_dir <- sprintf("supplements_%s_%s", i, j)))) dir.create(ms_dir <- file.path(media_dir, sup_dir))
+        for(si in seq_along(exm[[i]][[j]]$supplements)) {
+          file.copy(exm[[i]][[j]]$supplements[si],
+            file.path(ms_dir, f <- basename(exm[[i]][[j]]$supplements[si])))
+          if(any(grepl(dirname(exm[[i]][[j]]$supplements[si]), ibody))) {
+            ibody <- gsub(dirname(exm[[i]][[j]]$supplements[si]),
+              file.path(media_dir_name, sup_dir), ibody, fixed = TRUE)
+          } else {
+            if(any(grepl(f, ibody))) {
+              ibody <- gsub(paste(f, '"', sep = ''),
+                paste(paste0(media_dir_name, '/'), sup_dir, '/', f, '"', sep = ''), ibody, fixed = TRUE)
+            }
+          }
+        }
+      }
+
+      sec_xml <- c(sec_xml, ibody, "")
+    }
+
+    sec_xml <- c(sec_xml, "", "</section>")
+    maxattempts_tag <- make_tag(nmax0 <- maxattempts[j], type = "maxattempts", default = 1)
+    sec_xml <- gsub("##MaxAttempts##", maxattempts_tag, sec_xml, fixed = TRUE)
+  }
+
+  if(any(maxattempts != 1L) && solutionswitch) {
+    warning("if solutionswitch is TRUE, maxattempts should typically be 1 so that the solution cannot be copied by participants")
+  }
+
+  if(!is.null(duration)) {
+    dur0 <- duration
+    dursecs <- round(duration * 60)
+    dur <- dursecs %/% 86400 
+    dursecs <- dursecs - dur * 86400
+    duration <- paste("P0Y0M", dur, "DT", sep = "")
+    dur <- dursecs %/% 3600 
+    dursecs <- dursecs - dur * 3600
+    duration <- paste(duration, dur, "H", sep = "")
+    dur <- dursecs %/% 60 
+    dursecs <- dursecs - dur * 60
+    duration <- paste("<duration>", duration, dur, "M", dursecs, "S", "</duration>", sep = "")
+  } else {
+    dur0 <- duration <- ""
+  }
+
+  cutvalue <- make_tag(cutvalue, type = "cutvalue", default = 0, digits = 8)
+
+  feedbackswitch <- FALSE 
+  hintswitch <- FALSE
+  xml <- gsub("##TestIdent##", test_id, xml, fixed = TRUE)
+  xml <- gsub("##TestTitle##", name, xml, fixed = TRUE)
+  xml <- gsub("##TestDuration##", if(canvas) dur0 else duration, xml, fixed = TRUE)
+  xml <- gsub("##TestSections##", paste(sec_xml, collapse = "\n"), xml, fixed = TRUE)
+  xml <- gsub("##CutValue##", cutvalue, xml, fixed = TRUE)
+  xml <- gsub("##FeedbackSwitch##", if(feedbackswitch) "Yes" else "No", xml, fixed = TRUE)
+  xml <- gsub("##HintSwitch##",     if(hintswitch)     "Yes" else "No", xml, fixed = TRUE)
+  xml <- gsub("##SolutionSwitch##", if(solutionswitch) "Yes" else "No", xml, fixed = TRUE)
+  xml <- gsub("##AssessmentDescription##", adescription, xml, fixed = TRUE)
+
+  if(canvas) {
+    pos <- grep('<qtimetadata>', xml, fixed = TRUE)[1L]
+    xml <- c(
+      xml[1:pos],
+      if(dur0 != "") {
+        c('<qtimetadatafield>',
+          '<fieldlabel>qmd_timelimit</fieldlabel>',
+          paste0('<fieldentry>', dur0, '</fieldentry>'),
+          '</qtimetadatafield>')
+      } else NULL,
+      if(is.finite(nmax0)) {
+        c('<qtimetadatafield>',
+          '<fieldlabel>cc_maxattempts</fieldlabel>',
+          paste0('<fieldentry>', nmax0, '</fieldentry>'),
+        '</qtimetadatafield>')
+      } else NULL,
+      xml[(pos + 1L):length(xml)]
+    )
+  }
+
+  if(!identical(xmlcollapse, FALSE)) {
+    xmlcollapse <- if(identical(xmlcollapse, TRUE)) " " else as.character(xmlcollapse)
+
+    pre1 <- grep("<pre>", xml, fixed = TRUE)
+    pre2 <- grep("</pre>", xml, fixed = TRUE)
+    if(length(pre1) != length(pre2)) warning("cannot properly fix <pre> tags")
+    if(length(pre1) > 0L) {
+      for(i in length(pre1):1L) {
+        p1 <- pre1[i]
+        p2 <- pre2[i]
+        if(p2 > p1) {
+          xml[p1] <- paste(xml[p1:p2], collapse = "\n")
+          xml <- xml[-((p1 + 1L):p2)]
+        }
+      }
+    }
+
+    xml <- paste(xml, collapse = " ")
+  }
+
+  if(canvas) {
+    data_supps <- dir(file.path(test_dir, media_dir_name), recursive = TRUE, full.names = FALSE, include.dirs = FALSE)
+
+    for(j in data_supps) {
+      xml <- gsub(paste0('alt="', media_dir_name, '/', j, '"'),
+        paste0('alt="', basename(j), '"'), xml, fixed = TRUE)
+    }
+
+    quiz_id <- make_test_ids(type = "test")
+
+    dir.create(file.path(test_dir, quiz_id))
+
+    writeLines(xml, file.path(test_dir, quiz_id, paste(quiz_id, "xml", sep = ".")))
+
+    template_canvas <- file.path(pkg_dir, "xml", "canvas_meta.xml")
+    xml_meta <- readLines(template_canvas)
+
+    xml_meta <- gsub("##QuizIdent##", quiz_id, xml_meta, fixed = TRUE)
+    xml_meta <- gsub("##TestIdent##", test_id, xml_meta, fixed = TRUE)
+    xml_meta <- gsub("##AssignmentIdent##", paste0('AID_', test_id), xml_meta, fixed = TRUE)
+    xml_meta <- gsub("##GroupIdent##", paste0('GID_', test_id), xml_meta, fixed = TRUE)
+    xml_meta <- gsub("##TestTitle##", name, xml_meta, fixed = TRUE)
+    xml_meta <- gsub("##TestDuration##", dur0, xml_meta, fixed = TRUE)
+    xml_meta <- gsub("##MaxAttempts##", nmax0, xml_meta, fixed = TRUE)
+    xml_meta <- gsub("##AssessmentDescription##", adescription, xml_meta, fixed = TRUE)
+    xml_meta <- gsub("##Points##", sum(unlist(points)), xml_meta, fixed = TRUE)
+
+    xml_meta <- gsub("##QuizType##", quiztype, xml_meta, fixed = TRUE)
+    if(quiztype != "assignment") {
+      aid <- c(grep("<assignment identifier=", xml_meta, fixed = TRUE), grep("</assignment>", xml_meta, fixed = TRUE))
+      if(length(aid) == 2L && (aid[2L] > aid[1L])) xml_meta <- xml_meta[-(aid[1L]:aid[2L])]
+    }
+
+    writeLines(xml_meta, file.path(test_dir, quiz_id, "assessment_meta.xml"))
+
+    template_canvas <- file.path(pkg_dir, "xml", "canvas_manifest.xml")
+    manifest <- readLines(template_canvas)
+
+    manifest <- gsub("##ManifestIdent##", paste0('MID_', test_id), manifest, fixed = TRUE)
+    manifest <- gsub("##ManifestTitle##", name, manifest, fixed = TRUE)
+    manifest <- gsub("##Date##", Sys.Date(), manifest, fixed = TRUE)
+
+    resources <- c('<resources>',
+      paste0('    <resource identifier="', quiz_id, '" type="imsqti_xmlv1p2">'),
+      paste0('      <file href="', quiz_id, '/', paste(quiz_id, "xml", sep = "."), '"/>'),
+      paste0('      <dependency identifierref="', paste0('MID_REF_', test_id), '"/>'),
+      '    </resource>',
+      paste0('    <resource identifier="', paste0('MID_REF_', test_id),
+        '" type="associatedcontent/imscc_xmlv1p1/learning-application-resource" href="',
+        quiz_id, '/assessment_meta.xml">'),
+      paste0('      <file href="', quiz_id, '/assessment_meta.xml"/>'),
+      '    </resource>'
+    )
+
+    sid <- 1234
+    for(j in data_supps) {
+      resources <- c(resources,
+        paste0('    <resource href="', media_dir_name, '/', j, '" identifier="', sid, '" type="webcontent">'),
+        paste0('      <file href="', media_dir_name, '/', j,'"/>'),
+        '    </resource>'
+      )
+      sid <- sid + 1L
+    }
+
+    resources <- paste0(c(resources, '  </resources>'), collapse = '\n')
+
+    manifest <- gsub("##Resources##", resources, manifest, fixed = TRUE)
+
+    writeLines(manifest, file.path(test_dir, "imsmanifest.xml"))
+  } else {
+    writeLines(xml, file.path(test_dir, if(zip) "qti.xml" else paste(xmlname, "xml", sep = ".")))
+  }
 
   if(zip) {
-    pkgdir <- file.path(workdir, name)
-    dir.create(pkgdir)
-    writeLines(qti_xml, file.path(pkgdir, paste0(name, "_qti.xml")))
-    writeLines(make_qpl_xml(name, qrefs, pool_id), file.path(pkgdir, paste0(name, "_qpl.xml")))
-
-    ## Add solution to xml as qtimetadata
-    if(metasolution) solution_to_qtimetadata(name, rval, path = workdir)
-
     owd <- getwd()
-    setwd(workdir)
-    on.exit(setwd(owd), add = TRUE)
-    file.rename(name, paste0(name, "_qpl"))
-    zip(zipfile = paste0(name, "_qpl.zip"), files = paste0(name, "_qpl"))
-    file.copy(file.path(workdir, paste0(name, "_qpl.zip")),
-      file.path(outdir, paste0(name, "_qpl.zip")), overwrite = TRUE)
-  } else {
-    writeLines(qti_xml, file.path(outdir, paste0(name, ".xml")))
-  }
+    setwd(test_dir)
+    zip(zipfile = zipname <- paste(name, "zip", sep = "."), files = list.files(test_dir))
+    setwd(owd)
+  } else zipname <- list.files(test_dir)
 
-  invisible(rval)
+  file.copy(file.path(test_dir, zipname), dir, recursive = TRUE)
+
+  attr(exm, "test_id") <- test_id
+
+  invisible(exm)
 }
 
 
-extract_qti12_items <- function(xml) {
-  starts <- grep("^\\s*<item ident=", xml)
-  if(length(starts) < 1L) stop("no <item> tags found in generated QTI 1.2 XML")
-
-  rval <- vector("list", length(starts))
-  names(rval) <- character(length(starts))
-  end_cursor <- 1L
-
-  for(i in seq_along(starts)) {
-    ends <- grep("^\\s*</item>\\s*$", xml)
-    ends <- ends[ends >= starts[i] & ends >= end_cursor]
-    if(length(ends) < 1L) stop("unterminated <item> block in generated QTI 1.2 XML")
-    end_i <- ends[1L]
-    rval[[i]] <- xml[starts[i]:end_i]
-    names(rval)[i] <- sub('^\\s*<item ident="([^"]+)".*$', "\\1", xml[starts[i]])
-    end_cursor <- end_i + 1L
-  }
-
-  rval
+.empty_text <- function(x) {
+  is.null(x) || anyNA(x) || all(grepl("^[[:space:]]*$", x))
 }
 
-
-ilias_flatten_exams <- function(exm) {
-  rval <- list()
-  k <- 1L
-  for(i in seq_along(exm)) {
-    for(j in seq_along(exm[[i]])) {
-      rval[[k]] <- list(i = i, j = j, item = exm[[i]][[j]])
-      k <- k + 1L
-    }
-  }
-  rval
-}
-
-
-ilias_extract_item_title <- function(item_xml) {
-  sub('^\\s*<item ident="[^"]+" title="([^"]*)".*$', "\\1", item_xml[1L])
-}
-
-
-ilias_question_type <- function(type) {
-  switch(type,
-    "schoice" = "SINGLE CHOICE QUESTION",
-    "mchoice" = "MULTIPLE CHOICE QUESTION",
-    "num" = "NUMERIC QUESTION",
-    "cloze" = "CLOZE QUESTION",
-    "string" = "TEXT QUESTION",
-    stop("unsupported ILIAS question type: ", type)
-  )
-}
-
-
-ilias_escape_text <- function(x) {
-  x <- gsub("&", "&amp;", x, fixed = TRUE)
-  x <- gsub("<", "&lt;", x, fixed = TRUE)
-  gsub(">", "&gt;", x, fixed = TRUE)
-}
-
-
-ilias_escape_attribute <- function(x) {
-  x <- ilias_escape_text(x)
-  gsub('"', "&quot;", x, fixed = TRUE)
-}
-
-
-ilias_format_value <- function(x) {
-  trimws(format(x, scientific = FALSE, trim = TRUE))
-}
-
-
-ilias_item_header <- function(id, title, maxattempts = NULL) {
-  attr <- if(is.null(maxattempts)) "" else paste0(" ", maxattempts)
-  paste0('<item ident="', ilias_escape_attribute(id),
-    '" title="', ilias_escape_attribute(title), '"', attr, '>')
-}
-
-
-ilias_item_metadata <- function(questiontype, ilias_version = "9.17.0",
-  author = "R/exams", textgaprating = "ci", include_author = TRUE,
-  include_fixed_text_length = TRUE)
+make_itembody_qti12 <- function(rtiming = FALSE, shuffle = FALSE, rshuffle = shuffle,
+  minnumber = NULL, maxnumber = NULL, defaultval = NULL, minvalue = NULL,
+  maxvalue = NULL, cutvalue = NULL, enumerate = FALSE, digits = NULL, tolerance = is.null(digits),
+  maxchars = 12, eval = list(partial = TRUE, rule = "false2", negative = FALSE), fix_num = TRUE,
+  flavor = "plain")
 {
-  xml <- c(
-    '<qticomment></qticomment>',
-    '<itemmetadata>',
-    '<qtimetadata>',
-    '<qtimetadatafield>',
-    '<fieldlabel>ILIAS_VERSION</fieldlabel>',
-    paste0('<fieldentry>', ilias_escape_text(ilias_version), '</fieldentry>'),
-    '</qtimetadatafield>',
-    '<qtimetadatafield>',
-    '<fieldlabel>QUESTIONTYPE</fieldlabel>',
-    paste0('<fieldentry>', ilias_escape_text(questiontype), '</fieldentry>'),
-    '</qtimetadatafield>',
-    '<qtimetadatafield>',
-    '<fieldlabel>textgaprating</fieldlabel>',
-    paste0('<fieldentry>', textgaprating, '</fieldentry>'),
-    '</qtimetadatafield>',
-    '<qtimetadatafield>',
-    '<fieldlabel>identicalScoring</fieldlabel>',
-    '<fieldentry>1</fieldentry>',
-    '</qtimetadatafield>',
-    '</qtimetadata>',
-    '</itemmetadata>'
-  )
-  if(include_author) {
-    xml <- append(xml, c(
-      '<qtimetadatafield>',
-      '<fieldlabel>AUTHOR</fieldlabel>',
-      paste0('<fieldentry>', ilias_escape_text(author), '</fieldentry>'),
-      '</qtimetadatafield>'
-    ), after = 11L)
-  }
-  if(include_fixed_text_length) {
-    pos <- grep("<fieldlabel>identicalScoring</fieldlabel>", xml, fixed = TRUE)[1L]
-    xml <- append(xml, c(
-      '<qtimetadatafield>',
-      '<fieldlabel>fixedTextLength</fieldlabel>',
-      '<fieldentry/>',
-      '</qtimetadatafield>'
-    ), after = pos - 2L)
-  }
-  xml
-}
+  function(x) {
+    flavor <- match.arg(flavor, c("plain", "openolat", "canvas", "ilias"))
+    canvas <- flavor == "canvas"
+    if(canvas)
+      fix_num <- FALSE
 
+    points <- if(is.null(x$metainfo$points)) 1 else x$metainfo$points
 
-ilias_item_maxattempts <- function(item_xml) {
-  x <- regmatches(item_xml[1L], regexpr('maxattempts="[^"]+"', item_xml[1L]))
-  if(length(x) < 1L || identical(x, character(0L))) NULL else x
-}
+    solution <- if(!is.list(x$metainfo$solution)) {
+      list(x$metainfo$solution)
+    } else x$metainfo$solution
+    n <- length(solution)
 
-
-ilias_bare_qid <- function(qref) {
-  sub("^.*_qst_([0-9]+)$", "\\1", qref)
-}
-
-
-ilias_itemfeedback <- function(item_xml) {
-  start <- grep("^\\s*<itemfeedback", item_xml)
-  end <- grep("^\\s*</itemfeedback>\\s*$", item_xml)
-  if(length(start) < 1L || length(end) < 1L) return(NULL)
-  item_xml[min(start):max(end)]
-}
-
-
-patch_item_ilias <- function(item_xml, item_id, title, questiontype, maxattempts = 0) {
-  meta_start <- grep("^\\s*<itemmetadata>\\s*$", item_xml)
-  meta_end <- grep("^\\s*</itemmetadata>\\s*$", item_xml)
-  if(length(meta_start) != 1L || length(meta_end) != 1L || meta_end < meta_start) {
-    stop("cannot locate <itemmetadata> block in generated ILIAS item")
-  }
-
-  rval <- item_xml[-(meta_start:meta_end)]
-  rval[1L] <- ilias_item_header(item_id, title,
-    paste0('maxattempts="', if(is.infinite(maxattempts) || maxattempts == 0) 0 else maxattempts, '"'))
-  rval <- append(rval, ilias_item_metadata(questiontype), after = 1L)
-
-  p <- grep("^\\s*<presentation>\\s*$", rval)
-  if(length(p) > 0L) {
-    rval[p[1L]] <- paste0('<presentation label="', ilias_escape_attribute(title), '">')
-  }
-
-  rval
-}
-
-
-ilias_questionlist <- function(x) {
-  questionlist <- if(!is.list(x$questionlist)) {
-    if(x$metainfo$type == "cloze") {
-      g <- rep(seq_along(x$metainfo$solution), sapply(x$metainfo$solution, length))
-      if(!is.null(x$questionlist)) split(x$questionlist, g) else NULL
+    questionlist <- if(!is.list(x$questionlist)) {
+      if(x$metainfo$type == "cloze") {
+        g <- rep(seq_along(x$metainfo$solution), sapply(x$metainfo$solution, length))
+        split(x$questionlist, g)
+      } else list(x$questionlist)
     } else {
-      list(x$questionlist)
+      x$questionlist
     }
-  } else {
-    x$questionlist
-  }
-
-  if(length(questionlist) < 1L) {
-    questionlist <- NULL
-  } else {
-    for(i in seq_along(questionlist)) {
-      if(length(questionlist[[i]]) < 1L) questionlist[[i]] <- NA_character_
+    
+    if(length(questionlist) < 1) {
+      questionlist <- NULL
+    } else if(flavor == "ilias") {
+      questionlist <- lapply(questionlist, function(q) {
+        q <- gsub("<code>", '<code style="display:inline-block; vertical-align:middle; font-family:monospace; background-color:#f8f9fa; padding:2px 6px; border:1px solid #ddd; border-radius:3px;">', q, fixed = TRUE)
+        ifelse(grepl("<span", q, fixed = TRUE), q, paste0("<span>", q, "</span>"))
+      })
     }
-  }
 
-  questionlist
-}
+    tol <- if(!is.list(x$metainfo$tolerance)) {
+      if(x$metainfo$type == "cloze") as.list(x$metainfo$tolerance) else list(x$metainfo$tolerance)
+    } else x$metainfo$tolerance
+    tol <- rep(tol, length.out = n)
 
+    if((length(points) == 1) & (x$metainfo$type == "cloze"))
+      points <- points / n
 
-ilias_maxchars <- function(x, n, maxchars = 12) {
-  rval <- if(is.null(x$metainfo$maxchars)) {
-    if(length(maxchars) < 2L) c(maxchars, NA, NA) else maxchars[1:3]
-  } else x$metainfo$maxchars
+    q_points <- rep(points, length.out = n)
+    if(x$metainfo$type == "cloze")
+      points <- sum(q_points)
 
-  if(!is.list(rval)) rval <- list(rval)
-  rval <- rep(rval, length.out = n)
-  for(i in seq_along(rval)) {
-    if(length(rval[[i]]) < 2L) rval[[i]] <- c(rval[[i]], NA, NA)
-  }
-  rval
-}
+    type <- x$metainfo$type
+    type <- if(type == "cloze") x$metainfo$clozetype else rep(type, length.out = n)
 
+    if(is.null(eval) || length(eval) < 1L) eval <- exams_eval()
+    if(!is.list(eval)) stop("'eval' needs to specify a list of partial/negative/rule")
+    eval <- eval[match(c("partial", "negative", "rule"), names(eval), nomatch = 0)]
+    if(x$metainfo$type %in% c("num", "string", "schoice")) eval$partial <- FALSE
+    eval <- do.call("exams_eval", eval)
 
-ilias_choice_solution <- function(solution) {
-  if(is.logical(solution)) return(solution)
-  if(is.character(solution) && length(solution) == 1L && grepl("^[01]+$", solution)) {
-    return(as.logical(as.integer(strsplit(solution, "")[[1L]])))
-  }
-  as.logical(solution)
-}
+    maxchars <- if(is.null(x$metainfo$maxchars)) {
+        if(length(maxchars) < 2) {
+           c(maxchars, NA, NA)
+        } else maxchars[1:3]
+    } else x$metainfo$maxchars
+    if(!is.list(maxchars))
+      maxchars <- list(maxchars)
+    maxchars <- rep(maxchars, length.out = n)
+    for(j in seq_along(maxchars)) {
+      if(length(maxchars[[j]]) < 2)
+        maxchars[[j]] <- c(maxchars[[j]], NA, NA)
+    }
 
-
-ilias_material <- function(text, keep_whitespace = FALSE) {
-  if(is.null(text) || anyNA(text)) return(NULL)
-  text <- paste(text, collapse = "\n")
-  if(!keep_whitespace && .empty_text(text)) return(NULL)
-  if(keep_whitespace && identical(text, "")) return(NULL)
-  c(
-    '<material>',
-    paste0('<mattext texttype="text/xhtml">', ilias_escape_text(text), '</mattext>'),
-    '</material>'
-  )
-}
-
-
-ilias_gap_xml <- function(type, gap_id, choices, solution, tolerance, points, maxchars) {
-  if(type %in% c("essay", "file", "verbatim")) {
-    warning("ILIAS cloze export treats cloze type '", type, "' as a string gap")
-    type <- "string"
-  }
-
-  if(type == "string") {
-    cols <- if(!is.na(maxchars[3L])) maxchars[3L] else 0L
-    presentation <- c(
-      paste0('<response_str ident="', gap_id, '" rcardinality="Single">'),
-      paste0('<render_fib fibtype="String" prompt="Box" columns="', cols, '">'),
-      '</render_fib>',
-      '</response_str>'
+    xml <- c(
+      '<presentation>',
+      '<flow>',
+      if(!is.null(x$question)) {
+        c(
+          '<material>',
+          '<matbreak/>',
+          '<mattext texttype="text/html" charset="utf-8"><![CDATA[',
+          x$question,
+          ']]></mattext>',
+          '<matbreak/>',
+          '</material>'
+        )
+      } else NULL
     )
-    resprocessing <- unlist(lapply(as.character(solution), function(sol) {
-      c(
-        '<respcondition continue="Yes">',
-        '<conditionvar>',
-        paste0('<varequal respident="', gap_id, '">', ilias_escape_text(sol), '</varequal>'),
-        '</conditionvar>',
-        paste0('<setvar action="Add">', ilias_format_value(points), '</setvar>'),
-        '</respcondition>'
-      )
-    }), use.names = FALSE)
-    return(list(presentation = presentation, resprocessing = resprocessing))
-  }
 
-  if(type == "num") {
-    values <- as.numeric(solution)
-    tol <- suppressWarnings(as.numeric(tolerance))
-    tol <- tol[is.finite(tol)]
-    tol <- if(length(tol)) max(tol) else 0
-    if(!is.finite(tol) || tol <= 0) {
-      value_txt <- ilias_format_value(values[1L])
-      if(grepl(".", value_txt, fixed = TRUE)) {
-        decimals <- nchar(sub(".*\\.", "", value_txt))
-        tol <- 0.5 * 10^(-decimals)
+    letters2 <- c(letters,
+      paste0(sort(rep(letters, length(letters))),
+      rep(letters, length(letters))))
+
+    multiple_dropdowns <- FALSE
+
+    ids <- el <- pv <- list()
+    for(i in 1:n) {
+      iid <- x$metainfo$id
+
+      ids[[i]] <- list("response" = paste(iid, "RESPONSE", make_id(7), sep = "_"),
+        "questions" = paste(iid, make_id(10, length(solution[[i]])), sep = "_"))
+
+      ## THE 100% CORRECT FIX: The Boolean Trap Bypass
+      ## Only run multiple-choice math on actual choice gaps.
+      ## For strings and numbers, pass a dummy TRUE to safely extract the base points.
+      if(type[i] %in% c("schoice", "mchoice")) {
+        pv[[i]] <- eval$pointvec(solution[[i]])
       } else {
-        tol <- 0.1
+        pv[[i]] <- eval$pointvec(TRUE)
+      }
+
+      pv[[i]]["pos"] <- pv[[i]]["pos"] * q_points[i]
+      if(length(grep("choice", type[i])))
+        pv[[i]]["neg"] <- pv[[i]]["neg"] * q_points[i]
+
+      ans <- FALSE 
+
+      if(length(grep("choice", type[i]))) {
+
+        if(canvas & (type[i] == "schoice")) {
+          if(any(grepl(asub <- paste0("##ANSWER", i, "##"), xml))) {
+            xml <- gsub(asub, paste0("[", ids[[i]]$response, "]"), xml, fixed = TRUE)
+            multiple_dropdowns <- TRUE
+          }
+        }
+
+        txml <- c(
+          paste('<response_lid ident="', ids[[i]]$response, '" rcardinality="',
+            if(type[i] == "mchoice") "Multiple" else "Single", '" rtiming=',
+            if(rtiming) '"Yes"' else '"No"', '>', sep = ''),
+          paste('<render_choice shuffle="', if(shuffle) 'Yes' else 'No', '">', sep = '')
+        )
+        
+        for(j in seq_along(solution[[i]])) {
+          if(multiple_dropdowns) questionlist[[i]][j] <- pandoc(questionlist[[i]][j], from = "html", to = "plain")
+        
+          txml <- c(txml,
+            '<flow_label class="List">',
+            paste('<response_label ident="', ids[[i]]$questions[j], '" rshuffle="',
+              if(rshuffle) 'Yes' else 'No', '">', sep = ''),
+            '<material>',
+            '<mattext texttype="text/html" charset="utf-8"><![CDATA[',
+             paste(if(enumerate & n > 1) {
+               paste(letters2[if(x$metainfo$type == "cloze") i else j], ".",
+                 if(x$metainfo$type == "cloze" && length(solution[[i]]) > 1) paste(j, ".", sep = "") else NULL,
+                 sep = "")
+             } else NULL, questionlist[[i]][j]),
+            ']]></mattext>',
+            '</material>',
+            '</response_label>',
+            '</flow_label>'
+          )
+        }
+
+        txml <- c(txml,
+          '</render_choice>',
+          '</response_lid>'
+        )
+      }
+      if(type[i] == "string" || type[i] == "num") {
+        for(j in seq_along(solution[[i]])) {
+          soltext <- if(type[i] == "num") {
+             if(!is.null(digits)) format(round(solution[[i]][j], digits), nsmall = digits) else solution[[i]][j]
+          } else {
+            if(!is.character(solution[[i]][j])) format(solution[[i]][j]) else solution[[i]][j]
+          }
+          qlc <- .empty_text(questionlist[[i]][j])
+          txml <- c(
+            if(!qlc) {
+              c('<material>',
+                paste('<mattext><![CDATA[', paste(if(enumerate & n > 1) {
+                  paste(letters2[i], ".", sep = '')
+                } else NULL, questionlist[[i]][j]), ']]></mattext>', sep = ""),
+                '</material>',
+                '<material>', '<matbreak/>', '</material>'
+              )
+            } else NULL,
+            paste(
+          if(type[i] == "string") {
+            '<response_str ident="'
+          } else if(!tolerance | fix_num) {
+            '<response_str ident="'
+          } else {
+            '<response_num ident="'
+              },
+          ids[[i]]$response,
+          if(flavor == "ilias" && !is.na(maxchars[[i]][3])) {
+            '" rcardinality="Ordered"' 
+           } else {
+            '" rcardinality="Single"'
+           },
+          if(!(!tolerance | fix_num)) ' numtype="Decimal"' else NULL,
+          '>', sep = ''),
+            paste('<render_fib', if(!(!tolerance | fix_num)) ' fibtype="Decimal"' else NULL,
+              if(!is.na(maxchars[[i]][1])) {
+                paste(' maxchars="', max(c(nchar(soltext), maxchars[[i]][1])), '"', sep = '')
+              } else NULL,
+              if(!is.na(maxchars[[i]][2])) {
+                paste(' rows="', maxchars[[i]][2], '"', sep = '')
+              } else NULL,
+              if(!is.na(maxchars[[i]][3])) {
+                paste(' columns="', maxchars[[i]][3], '"', sep = '')
+              } else NULL,
+              if(flavor == "ilias" && !is.na(maxchars[[i]][3])) {
+                ' fibtype="String" prompt="Box"'
+              } else NULL,  
+          '>', sep = ''),
+            '<flow_label class="Block">',
+            paste('<response_label ident="', ids[[i]]$response, '" rshuffle="No"/>', sep = ''),
+            '</flow_label>',
+            '</render_fib>',
+            if(type[i] == "string") '</response_str>' else {
+              if(!tolerance | fix_num) '</response_str>' else '</response_num>'
+            },
+            '<material>', '<matbreak/>', '</material>'
+          )
+        }
+      }
+
+      if(ans) {
+        txml <- paste(txml, collapse = '\n')
+        xml <- gsub(paste0("##ANSWER", i, "##"), txml, xml, fixed = TRUE)
+      } else {
+        xml <- c(xml, txml)
       }
     }
-    cols <- if(!is.na(maxchars[3L])) maxchars[3L] else max(2L, nchar(ilias_format_value(values[1L])))
-    presentation <- c(
-      paste0('<response_num ident="', gap_id, '" numtype="Decimal" rcardinality="Single">'),
-      paste0('<render_fib fibtype="Decimal" prompt="Box" columns="', cols,
-        '" maxchars="0" minnumber="', ilias_format_value(min(values) - tol),
-        '" maxnumber="', ilias_format_value(max(values) + tol), '">'),
-      '</render_fib>',
-      '</response_num>'
-    )
-    resprocessing <- unlist(lapply(values, function(sol) {
-      c(
-        '<respcondition continue="Yes">',
-        '<conditionvar>',
-        paste0('<varequal respident="', gap_id, '">', ilias_format_value(sol), '</varequal>'),
-        '</conditionvar>',
-        paste0('<setvar action="Add">', ilias_format_value(points), '</setvar>'),
-        '</respcondition>'
-      )
-    }), use.names = FALSE)
-    return(list(presentation = presentation, resprocessing = resprocessing))
-  }
 
-  ## FIX A: String Crash Firewall
-  if(type %in% c("schoice", "mchoice")) {
-    if(!length(choices)) choices <- as.character(seq_along(solution))
-    correct <- ilias_choice_solution(solution)
-    if(length(correct) != length(choices)) {
-      stop("choice-based cloze gap has mismatched choices and solution length")
-    }
-
-    choice_points <- if(type == "mchoice" && any(correct)) points / sum(correct) else points
-    presentation <- c(
-      paste0('<response_str ident="', gap_id, '" rcardinality="',
-        if(type == "mchoice") "Multiple" else "Single", '">'),
-      '<render_choice shuffle="No">'
-    )
-    for(j in seq_along(choices)) {
-      presentation <- c(presentation,
-        paste0('<response_label ident="', j - 1L, '">'),
-        '<material>',
-        ## FIX C: CDATA Shield for HTML Symbols
-        paste0('<mattext><![CDATA[', ilias_escape_text(choices[j]), ']]></mattext>'),
-        '</material>',
-        '</response_label>'
-      )
-    }
-    presentation <- c(presentation, '</render_choice>', '</response_str>')
-
-    resprocessing <- unlist(lapply(seq_along(choices), function(j) {
-      pts <- if(correct[j]) choice_points else 0
-      c(
-        '<respcondition continue="Yes">',
-        '<conditionvar>',
-        ## FIX C: CDATA Shield applied to the resprocessing logic as well
-        paste0('<varequal respident="', gap_id, '"><![CDATA[', ilias_escape_text(choices[j]), ']]></varequal>'),
-        '</conditionvar>',
-        paste0('<setvar action="Add">', ilias_format_value(pts), '</setvar>'),
-        '</respcondition>'
-      )
-    }), use.names = FALSE)
-
-    return(list(presentation = presentation, resprocessing = resprocessing))
-  } else {
-    ## Fail-safe for completely unknown gap types
-    return(list(presentation = character(0), resprocessing = character(0)))
-  }
-}
-
-
-make_item_ilias_cloze <- function(item_xml, x, item_id, title, maxattempts = 0) {
-  solution <- if(!is.list(x$metainfo$solution)) list(x$metainfo$solution) else x$metainfo$solution
-  n <- length(solution)
-  
-  ## FIX B: The Padding Bug (Solution list dynamically expanded)
-  if(length(x$solutionlist) < n) {
-    x$solutionlist <- c(x$solutionlist, as.list(rep(NA, n - length(x$solutionlist))))
-  }
-
-  type <- x$metainfo$clozetype
-  tol <- if(!is.list(x$metainfo$tolerance)) as.list(x$metainfo$tolerance) else x$metainfo$tolerance
-  tol <- rep(tol, length.out = n)
-  
-  questionlist <- ilias_questionlist(x)
-  if(is.null(questionlist)) questionlist <- vector("list", n)
-  
-  ## FIX B (continued): Ensure questionlist strictly matches total gap count
-  if(length(questionlist) < n) {
-    questionlist <- c(questionlist, vector("list", n - length(questionlist)))
-  }
-  
-  maxchars <- ilias_maxchars(x, n)
-
-  points <- if(is.null(x$metainfo$points)) rep(1, n) else x$metainfo$points
-  q_points <- rep(points, length.out = n)
-
-  presentation <- c(
-    paste0('<presentation label="', ilias_escape_attribute(title), '">'),
-    '<flow>'
-  )
-  resprocessing <- c(
-    '<resprocessing>',
-    '<outcomes>',
-    '<decvar></decvar>',
-    '</outcomes>'
-  )
-
-  question <- if(!is.null(x$question)) paste(x$question, collapse = "\n") else NULL
-  has_answertags <- !is.null(question) && grepl("##ANSWER[0-9]+##", question)
-
-  if(has_answertags) {
-    parts <- strsplit(question, "##ANSWER[0-9]+##", perl = TRUE)[[1L]]
-    markers <- gregexpr("##ANSWER[0-9]+##", question, perl = TRUE)
-    markers <- regmatches(question, markers)[[1L]]
-    gaps <- as.integer(sub("##ANSWER([0-9]+)##", "\\1", markers))
-
-    if(length(parts) != length(gaps) + 1L) {
-      stop("cannot split cloze question into text and answer gaps")
-    }
-
-    for(k in seq_along(gaps)) {
-      i <- gaps[k]
-      if(i < 1L || i > n) stop("invalid ##ANSWER tag in cloze question")
-      presentation <- c(presentation, ilias_material(parts[k], keep_whitespace = TRUE))
-      gap_xml <- ilias_gap_xml(type[i], paste0("gap_", i - 1L), questionlist[[i]],
-        solution[[i]], tol[[i]], q_points[i], maxchars[[i]])
-      presentation <- c(presentation, gap_xml$presentation)
-      resprocessing <- c(resprocessing, gap_xml$resprocessing)
-    }
-    presentation <- c(presentation, ilias_material(parts[length(parts)], keep_whitespace = TRUE))
-  } else {
-    presentation <- c(presentation, ilias_material(question))
-    for(i in seq_len(n)) {
-      if(type[i] %in% c("string", "num", "essay", "file", "verbatim")) {
-        presentation <- c(presentation, ilias_material(questionlist[[i]]))
+    if(canvas) {
+      canvas_type <- if(multiple_dropdowns) {
+        "multiple_dropdowns_question"
+      } else {
+        if(length(type) > 1L) stop("only cloze questions with schoice elements are supported for Canvas")
+        switch(type,
+          "num" = "numerical_question",
+          "schoice" = "multiple_choice_question",
+          "mchoice" = "multiple_answers_question",
+          "string" = "short_answer_question"
+        )
       }
-      gap_xml <- ilias_gap_xml(type[i], paste0("gap_", i - 1L), questionlist[[i]],
-        solution[[i]], tol[[i]], q_points[i], maxchars[[i]])
-      presentation <- c(presentation, gap_xml$presentation)
-      resprocessing <- c(resprocessing, gap_xml$resprocessing)
-    }
-  }
-
-  presentation <- c(presentation, '</flow>', '</presentation>')
-  resprocessing <- c(resprocessing, '</resprocessing>')
-
-  c(
-    ilias_item_header(item_id, title,
-      paste0('maxattempts="', if(is.infinite(maxattempts) || maxattempts == 0) 0 else maxattempts, '"')),
-    ilias_item_metadata("CLOZE QUESTION",
-      include_author = FALSE, include_fixed_text_length = FALSE),
-    presentation,
-    resprocessing,
-    '</item>'
-  )
-}
-
-
-ilias_collapse_xml <- function(xml, xmlcollapse) {
-  if(identical(xmlcollapse, FALSE)) return(xml)
-  collapse <- if(identical(xmlcollapse, TRUE)) " " else as.character(xmlcollapse)
-  paste(xml, collapse = collapse)
-}
-
-
-make_qpl_xml <- function(name, qrefs, pool_id = paste0(name, "_qpl")) {
-  xml <- c(
-    '<?xml version="1.0" encoding="utf-8"?>',
-    '<!DOCTYPE Test SYSTEM "http://www.ilias.uni-koeln.de/download/dtd/ilias_co.dtd">',
-    '',
-    '<ContentObject Type="Questionpool_Test">',
-    '<MetaData>',
-    '<General Structure="Hierarchical">',
-    paste0('<Identifier Catalog="ILIAS" Entry="', pool_id, '"/>'),
-    paste0('<Title Language="en">', name, '</Title>'),
-    '<Language Language="en"/>',
-    '<Description Language="en"/>',
-    '<Keyword Language="en"/>',
-    '</General>',
-    '</MetaData>',
-    '<Settings>',
-    '<ShowTaxonomies>0</ShowTaxonomies>',
-    '<NavTaxonomy>0</NavTaxonomy>',
-    '<SkillService>0</SkillService>',
-    '</Settings>'
-  )
-
-  for(qref in qrefs) {
-    xml <- c(xml,
-      '<PageObject>',
-      '<PageContent>',
-      paste0('<Question QRef="', qref, '"/>'),
-      '</PageContent>',
-      '</PageObject>'
-    )
-  }
-
-  xml <- c(xml, '<QuestionSkillAssignments>')
-  for(qref in qrefs) {
-    xml <- c(xml,
-      paste0('<TriggerQuestion Id="', ilias_bare_qid(qref), '"></TriggerQuestion>')
-    )
-  }
-
-  c(xml, '</QuestionSkillAssignments>', '</ContentObject>')
-}
-
-
-# In order for an ILIAS test to recognize a solution to an essay question, the
-# solution needs to be included in the xml as a qtimetadata tag.
-solution_to_qtimetadata <- function(name, exm, path = ".") {
-  xml <- readLines(file.path(path, name, paste0(name, "_qti.xml")), warn = FALSE)
-
-  for(i in seq_along(exm)) {
-    ## Where to append qtimetadata?
-    idx <- (grep("QUESTIONTYPE", xml) + 2)[i]
-
-    ## Get solution, FIXME: exm[[i]] may have more than a single question
-    solustr <- paste(exm[[i]][[1]]$solution, collapse = "\n")
-
-    ## Split into several solustr by ol/ul li items
-    if(exm[[i]][[1]]$solution[1] %in% c("<ol>", "<ul>")) {
-      solustr <- gsub("</li>.*", "", strsplit(solustr, "<li>")[[1]])[-1]
-    }
-
-    ## Encode solution
-    solustr <- solustr_to_phpstruct(solustr, length(solustr))
-
-    ## Append solution
-    xml <- append(xml,
-      c("<qtimetadatafield>",
-        paste0("<fieldlabel>termscoring</fieldlabel><fieldentry>",
-          solustr, "</fieldentry>"),
-        "</qtimetadatafield>",
-        "<qtimetadatafield>",
-        "<fieldlabel>termrelation</fieldlabel><fieldentry>any</fieldentry>",
-        "</qtimetadatafield>"),
-      after = idx)
-  }
-
-  writeLines(xml, file.path(path, name, paste0(name, "_qti.xml")))
-}
-
-
-# And the solution needs to be wrapped in some php data structure,
-# https://github.com/ILIAS-eLearning/ILIAS/blob/release_5-4/Modules/TestQuestionPool/classes/class.assAnswerMultipleResponseImage.php
-# and be base encoded.
-solustr_to_phpstruct <- function(solustr, nitems, encode = TRUE){
-  items <- raw(0)
-  for(i in seq_len(nitems)){
-    items <- c(items,
-      c(
-        charToRaw(paste0(
-          'i:', i - 1,
-          ';O:31:"ASS_AnswerMultipleResponseImage":6:{',
-          's:5:"image";s:0:"";s:16:"points_unchecked";s:1:"0";'
-        )),
-        charToRaw('s:13:"'), as.raw(0x00), charToRaw('*'), as.raw(0x00),
-          charToRaw(paste0('answertext";s:', nchar(solustr[i]), ':"',
-                           solustr[i], '";')),
-        charToRaw('s:9:"'), as.raw(0x00), charToRaw('*'), as.raw(0x00),
-          charToRaw('points";s:1:"1";'),
-        charToRaw('s:8:"'), as.raw(0x00), charToRaw('*'), as.raw(0x00),
-          charToRaw('order";i:0;'),
-        charToRaw('s:5:"'), as.raw(0x00), charToRaw('*'), as.raw(0x00),
-          charToRaw('id";i:-1;}')
+      if(identical(type, "string") && !is.null(stringtype <- x$metainfo$stringtype) && !identical(x$metainfo$stringtype, "string")) {
+        if(length(stringtype) > 1L) {
+          stringtype <- stringtype[1L]
+          warning(sprintf("for Canvas only a single 'stringtype' is supported, using the first: %s", stringtype))
+        }
+        if(stringtype == "essay") canvas_type <- "essay_question"
+        if(stringtype == "file") canvas_type <- "file_upload_question"
+      }
+      xml <- c(
+        '<itemmetadata>',
+        '<qtimetadata>',
+        '<qtimetadatafield>',
+        '<fieldlabel>question_type</fieldlabel>',
+        paste0('<fieldentry>', canvas_type, '</fieldentry>'),
+        '</qtimetadatafield>',
+        if(multiple_dropdowns) {
+          c('<qtimetadatafield>',
+          '<fieldlabel>original_answer_ids</fieldlabel>',
+          paste0('<fieldentry>', paste0(ids[[i]]$questions, collapse = ','), '</fieldentry>'),
+          '</qtimetadatafield>')
+        } else NULL,
+        '</qtimetadata>',
+        '</itemmetadata>',
+        xml
       )
-    )
+    }
+
+    xml <- c(xml, '</flow>', '</presentation>')
+
+    if(is.null(minvalue)) {  
+      if(eval$negative) {
+        minvalue <- sum(sapply(pv, function(x) { x["neg"] }))
+      } else minvalue <- 0
+    }
+
+    xml <- c(xml,
+      '<resprocessing>',
+      '<outcomes>',
+      paste('<decvar varname="SCORE" vartype="Decimal" defaultval="',
+        if(is.null(defaultval)) 0 else defaultval, '" minvalue="',
+        if(is.null(minvalue) | is.na(minvalue)) 0 else minvalue, '" maxvalue="',
+        if(is.null(maxvalue)) points else maxvalue, '" cutvalue="',
+        if(is.null(cutvalue)) points else cutvalue, '"/>', sep = ''),
+      '</outcomes>')
+
+    correct_answers <- wrong_answers <- correct_num <- wrong_num <- vector(mode = "list", length = n)
+    for(i in 1:n) {
+      if(length(grep("choice", type[i]))) {
+
+        for(j in seq_along(solution[[i]])) {
+          if(solution[[i]][j]) {
+            correct_answers[[i]] <- c(correct_answers[[i]],
+              paste('<varequal respident="', ids[[i]]$response,
+                '" case="Yes">', ids[[i]]$questions[j], '</varequal>', sep = '')
+            )
+          } else {
+            wrong_answers[[i]] <- c(wrong_answers[[i]],
+              paste('<varequal respident="', ids[[i]]$response,
+                '" case="Yes">', ids[[i]]$questions[j], '</varequal>', sep = '')
+            )
+          }
+        }
+      }
+      if(type[i] == "string" || type[i] == "num") {
+        for(j in seq_along(solution[[i]])) {
+          if(type[i] == "string") {
+            soltext <- if(!is.character(solution[[i]][j])) {
+              format(round(solution[[i]][j], digits), nsmall = digits)
+            } else solution[[i]][j]
+            correct_answers[[i]] <- c(correct_answers[[i]], paste('<varequal respident="', ids[[i]]$response,
+              '" case="No"><![CDATA[', soltext, ']]></varequal>', sep = "")
+            )
+          } else {
+            correct_answers[[i]] <- c(correct_answers[[i]],
+              if(!tolerance) {
+                paste('<varequal respident="', ids[[i]]$response,
+                  '" case="No"><![CDATA[', if(!is.null(digits)) {
+                    format(round(solution[[i]][j], digits), nsmall = digits)
+                  } else solution[[i]][j],
+                  ']]></varequal>', sep = "")
+              } else {
+                if(fix_num) {
+                  correct_num[[i]] <- c(correct_num[[i]],
+                    paste('<varequal respident="', ids[[i]]$response,
+                      '" case="No"><![CDATA[', if(!is.null(digits)) {
+                      format(round(solution[[i]][j], digits), nsmall = digits)
+                      } else solution[[i]][j],
+                      ']]></varequal>', sep = "")
+                  )
+                } 
+                wrong_num[[i]] <- paste(
+                  if(canvas) {
+                    paste(c('\n<or>', paste('<varequal respident="', ids[[i]]$response,
+                      '" case="No"><![CDATA[', if(!is.null(digits)) {
+                      format(round(solution[[i]][j], digits), nsmall = digits)
+                      } else solution[[i]][j],
+                      ']]></varequal>\n', sep = "")), collapse = '\n', sep = '')
+                  } else NULL,
+                  '<and>\n',
+                  paste('<vargte respident="', ids[[i]]$response, '"><![CDATA[',
+                    solution[[i]][j] - max(tol[[i]]),
+                    ']]></vargte>\n', sep = ""),
+                  paste('<varlte respident="', ids[[i]]$response, '"><![CDATA[',
+                    solution[[i]][j] + max(tol[[i]]),
+                    ']]></varlte>\n', sep = ""),
+                  '</and>',
+                  if(canvas) '\n</or>' else NULL,
+                  collapse = '\n', sep = ''
+                )
+              }
+            )
+          }
+        }
+      }
+      if(!is.null(correct_answers[[i]])) {
+        attr(correct_answers[[i]], "points") <- pv[[i]]
+        attr(correct_answers[[i]], "type") <- type[i]
+      }
+      if(!is.null(wrong_answers[[i]]))
+        attr(wrong_answers[[i]], "points") <- pv[[i]]
+    }
+
+    correct_answers <- delete.NULLs(correct_answers)
+    wrong_answers <- delete.NULLs(wrong_answers)
+    correct_num <- unlist(delete.NULLs(correct_num))
+    wrong_num <- delete.NULLs(wrong_num)
+    if(length(wrong_num)) {
+      wrong_num <- sapply(wrong_num, function(x) {
+        paste('<not>', x, '</not>', collapse = '\n')
+      })
+      wrong_num <- unlist(wrong_num)
+    }
+
+    is_ilias <- identical(flavor, "ilias")
+    is_ilias_choice <- is_ilias && (x$metainfo$type %in% c("mchoice", "schoice"))
+
+    if(is_ilias_choice) {
+      if (x$metainfo$type == "schoice") {
+        xml <- c(xml,
+          '<respcondition title="Mastery" continue="Yes">',
+          '<conditionvar>',
+          unlist(correct_answers),
+          '</conditionvar>',
+          paste('<setvar varname="SCORE" action="Add">', points, '</setvar>', sep = ''),
+          '<displayfeedback feedbacktype="Response" linkrefid="Mastery"/>',
+          '</respcondition>'
+        )
+      } else if (x$metainfo$type == "mchoice") {
+        if(length(correct_answers)) {
+          for(i in seq_along(correct_answers)) {
+            for(j in correct_answers[[i]]) {
+              pts <- if(eval$partial) attr(correct_answers[[i]], "points")["pos"] else points
+              xml <- c(xml,
+                '<respcondition continue="Yes">',
+                '<conditionvar>', j, '</conditionvar>',
+                paste0('<setvar varname="SCORE" action="Add">', pts, '</setvar>'),
+                '</respcondition>',
+                '<respcondition continue="Yes">',
+                '<conditionvar><not>', j, '</not></conditionvar>',
+                '<setvar varname="SCORE" action="Add">0</setvar>',
+                '</respcondition>'
+              )
+            }
+          }
+        }
+        if(length(wrong_answers)) {
+          for(i in seq_along(wrong_answers)) {
+            for(j in wrong_answers[[i]]) {
+              pts <- if(eval$partial) attr(wrong_answers[[i]], "points")["neg"] else 0
+              xml <- c(xml,
+                '<respcondition continue="Yes">',
+                '<conditionvar>', j, '</conditionvar>',
+                paste0('<setvar varname="SCORE" action="Add">', pts, '</setvar>'),
+                '</respcondition>',
+                '<respcondition continue="Yes">',
+                '<conditionvar><not>', j, '</not></conditionvar>',
+                '<setvar varname="SCORE" action="Add">0</setvar>',
+                '</respcondition>'
+              )
+            }
+          }
+        }
+      }
+    } else {
+      if((eval$partial | x$metainfo$type == "cloze") & !multiple_dropdowns) {
+        if(length(correct_answers)) {
+          for(i in seq_along(correct_answers)) {
+            for(j in correct_answers[[i]]) {
+              xml <- c(xml,
+                '<respcondition continue="Yes" title="Mastery">',
+                '<conditionvar>',
+                j,
+                '</conditionvar>',
+                paste('<setvar varname="SCORE" action="Add">',
+                  attr(correct_answers[[i]], "points")["pos"], '</setvar>', sep = ''),
+                '</respcondition>'
+              )
+            }
+          }
+        }
+        if(length(wrong_answers)) {
+          for(i in seq_along(wrong_answers)) {
+            for(j in wrong_answers[[i]]) {
+              xml <- c(xml,
+                '<respcondition continue="Yes" title="Fail">',
+                '<conditionvar>',
+                j,
+                '</conditionvar>',
+                paste('<setvar varname="SCORE" action="Add">',
+                  attr(wrong_answers[[i]], "points")["neg"], '</setvar>', sep = ''),
+                '<displayfeedback feedbacktype="Solution" linkrefid="Solution"/>',
+                '</respcondition>'
+              )
+            }
+          }
+        }
+      }
+
+      if(eval$partial & x$metainfo$type == "cloze") {
+        if(length(correct_answers)) {
+          for(i in seq_along(correct_answers)) {
+            ctype <- attr(correct_answers[[i]], "type")
+            if(ctype == "string" || ctype == "num" || ctype == "schoice") {
+              xml <- c(xml,
+                '<respcondition title="Fail" continue="Yes">',
+                '<conditionvar>',
+                '<not>',
+                correct_answers[[i]],
+                '</not>',
+                '</conditionvar>',
+                paste('<setvar varname="SCORE" action="Add">',
+                  attr(correct_answers[[i]], "points")["neg"], '</setvar>', sep = ''),
+                '<displayfeedback feedbacktype="Solution" linkrefid="Solution"/>',
+                '</respcondition>'
+              )
+            }
+          }
+        }
+      }
+
+      if(!multiple_dropdowns) {
+        xml <- c(xml,
+          paste('<respcondition title="Mastery"', if(canvas) 'continue="No">' else ' continue="Yes">'),
+          '<conditionvar>',
+          if(!is.null(correct_answers) & (length(correct_answers) > 1 | grepl("choice", x$metainfo$type))) '<and>' else NULL
+        )
+
+        xml <- c(xml,
+          unlist(correct_answers),
+          if(!is.null(correct_answers) & (length(correct_answers) > 1 | grepl("choice", x$metainfo$type))) {
+              if(canvas) NULL else '</and>'
+            } else { NULL },
+          if(!is.null(wrong_answers)) {
+            if(canvas) {
+              c(paste('<not>', unlist(wrong_answers), '</not>'), '</and>')
+            } else {
+              c('<not>', '<or>', unlist(wrong_answers), '</or>', '</not>')
+            }
+          } else {
+            NULL
+          },
+          '</conditionvar>',
+          if(!eval$partial) {
+            paste('<setvar varname="SCORE" action="Set">', points, '</setvar>', sep = '')
+          } else NULL,
+          paste('<displayfeedback feedbacktype="Response"', if(canvas) 'linkrefid="correct_fb"/>' else 'linkrefid="Mastery"/>'),
+          '</respcondition>'
+        )
+      } else {
+        for(i in seq_along(correct_answers)) {
+          xml <- c(xml,
+            '<respcondition>',
+            '<conditionvar>',
+            correct_answers[[i]],
+            '</conditionvar>',
+            paste0('<setvar varname="SCORE" action="Add">', if(eval$partial) attr(correct_answers[[i]], "points")["pos"] else points, '</setvar>'),
+            '</respcondition>'
+          )
+        }
+      }
+
+      if(length(correct_num)) {
+        for(j in correct_num) {
+          xml <- c(xml,
+            '<respcondition continue="Yes" title="Mastery">',
+            '<conditionvar>', j, '</conditionvar>',
+            if(fix_num) {
+              c(paste('<setvar varname="SCORE" action="Add">', 0.001, '</setvar>', sep = ''),
+                paste('<setvar varname="SCORE" action="Add">', -0.001, '</setvar>', sep = ''))
+            } else NULL,
+            '</respcondition>'
+          )
+        }
+      }
+
+      if(length(correct_answers)) {
+        for(j in seq_along(correct_answers)) {
+          if(attr(correct_answers[[j]], "type") != "num") {
+            if(canvas & grepl("choice", attr(correct_answers[[j]], "type"))) {
+              if((length(correct_answers) > 1L) & !multiple_dropdowns) {
+                xml <- c(xml, '<respcondition continue="Yes" title="Mastery">', '<conditionvar>', correct_answers[[j]], '</conditionvar>', '</respcondition>')
+              }
+            } else {
+              xml <- c(xml, '<respcondition continue="Yes" title="Mastery">', '<conditionvar>', correct_answers[[j]], '</conditionvar>', '</respcondition>')
+            }
+          }
+        }
+      }
+
+      correct_answers <- unlist(correct_answers)
+      wrong_answers <- c(unlist(wrong_answers), unlist(wrong_num))
+
+      if(!eval$partial & x$metainfo$type == "cloze") {
+        if(length(correct_answers) & !multiple_dropdowns) {
+          for(i in seq_along(correct_answers)) {
+              xml <- c(xml, '<respcondition title="Fail" continue="Yes">', '<conditionvar>', '<not>', correct_answers[[i]], '</not>', '</conditionvar>', paste('<setvar varname="SCORE" action="Add">', -1 * n * points, '</setvar>', sep = ''), '<displayfeedback feedbacktype="Solution" linkrefid="Solution"/>', '</respcondition>')
+          }
+        }
+        if(length(wrong_answers) & !multiple_dropdowns) {
+          for(i in seq_along(wrong_answers)) {
+            for(j in wrong_answers[[i]]) {
+              xml <- c(xml, '<respcondition continue="Yes" title="Fail">', '<conditionvar>', j, '</conditionvar>', paste('<setvar varname="SCORE" action="Add">', -1 * n * points, '</setvar>', sep = ''), '<displayfeedback feedbacktype="Solution" linkrefid="Solution"/>', '</respcondition>')
+            }
+          }
+        }
+      }
+
+      if(!canvas) {
+        xml <- c(xml,
+          '<respcondition title="Fail" continue="Yes">',
+          '<conditionvar>',
+          if(!is.null(wrong_answers)) NULL else '<not>',
+          if(is.null(wrong_answers)) {
+            c(if(length(correct_answers) > 1) '<and>' else NULL, correct_answers, if(length(correct_answers) > 1) '</and>' else NULL)
+          } else {
+            c('<or>', wrong_answers, '</or>')
+          },
+          if(!is.null(wrong_answers)) NULL else '</not>',
+          '</conditionvar>',
+          if(!eval$partial & !is.na(minvalue)) { paste('<setvar varname="SCORE" action="Set">', minvalue, '</setvar>', sep = '') } else NULL,
+          '<displayfeedback feedbacktype="Solution" linkrefid="Solution"/>',
+          '</respcondition>',
+          '<respcondition title="Fail" continue="Yes">', '<conditionvar>', '<other/>', '</conditionvar>', paste('<setvar varname="SCORE" action="Set">', 0, '</setvar>', sep = ''), '<displayfeedback feedbacktype="Solution" linkrefid="Solution"/>', '</respcondition>'
+        )
+      } else {
+        xml <- c(xml, '<respcondition continue="Yes">', '<conditionvar>', '<other/>', '</conditionvar>', '<displayfeedback feedbacktype="Response" linkrefid="general_incorrect_fb"/>', '</respcondition>')
+      }
+    }
+
+    xml <- c(xml, '</resprocessing>')
+    attr(xml, "enumerate") <- enumerate
+    xml
   }
-  rval <- c(charToRaw(paste0('a:', nitems, ':{')), items, charToRaw('}'))
-  if(encode)
-    rval <- base64enc::base64encode(rval)
+}
+
+make_id <- function(size, n = 1L) {
+  if(is.null(n)) n <- 1L
+  rval <- matrix(sample(0:9, size * n, replace = TRUE), ncol = n, nrow = size)
+  rval[1L, ] <- pmax(1L, rval[1L, ])
+  colSums(rval * 10^((size - 1L):0L))
+}
+
+delete.NULLs <- function(x.list) {
+  rval <- x.list[unlist(lapply(x.list, length) != 0)]
+  rval <- if(length(rval)) rval else NULL
   rval
 }
