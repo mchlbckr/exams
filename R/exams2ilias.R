@@ -34,7 +34,12 @@ exams2ilias <- function(file, n = 1L, nsamp = NULL, dir = ".",
 
   if(is.null(name)) name <- gsub("\\.xml$", "", template)
 
-  base64 <- .fileURI_mime_types[, "ext"]
+  # ========================================================================
+  # ILIAS FIX: Restrict Base64 encoding to images only.
+  # Replaced the original `base64 <- .fileURI_mime_types[, "ext"]` which 
+  # forced data files into inline text strings that ILIAS blocked.
+  # ========================================================================
+  base64 <- c("bmp", "gif", "jpeg", "jpg", "png", "svg")
 
   outdir <- file_path_as_absolute(dir)
   dir.create(workdir <- tempfile())
