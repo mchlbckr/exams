@@ -13,7 +13,6 @@ exams2ilias <- function(file, n = 1L, nsamp = NULL, dir = ".",
   converter = "pandoc-mathjax", xmlcollapse = TRUE,
   metasolution = FALSE, ...)
 {
-  ## assure a certain processing of items for ILIAS
   if(is.null(num)) {
     num <- list(fix_num = FALSE, minvalue = NA)
   } else {
@@ -33,13 +32,10 @@ exams2ilias <- function(file, n = 1L, nsamp = NULL, dir = ".",
     schoice$minvalue <- NA
   }
 
-  ## default name
   if(is.null(name)) name <- gsub("\\.xml$", "", template)
 
-  ## enforce base64 encoding for "everything"
   base64 <- .fileURI_mime_types[, "ext"]
 
-  ## create plain QTI 1.2 XML first, then rewrite it to the ILIAS pool layout
   outdir <- file_path_as_absolute(dir)
   dir.create(workdir <- tempfile())
   on.exit(unlink(workdir, recursive = TRUE), add = TRUE)
@@ -328,7 +324,6 @@ ilias_choice_solution <- function(solution) {
   as.logical(solution)
 }
 
-## FIX: Use CDATA instead of HTML escaping to preserve paragraph/list layout!
 ilias_material <- function(text, keep_whitespace = FALSE) {
   if(is.null(text) || anyNA(text)) return(NULL)
   text <- paste(text, collapse = "\n")
@@ -418,11 +413,18 @@ ilias_gap_xml <- function(type, gap_id, choices, solution, tolerance, points, ma
       '<render_choice shuffle="No">'
     )
     for(j in seq_along(choices)) {
+      
+      ## THE UN-ESCAPE FIX: Strip Pandoc HTML entities so CDATA protects raw symbols
+      choice_text <- choices[j]
+      choice_text <- gsub("&lt;", "<", choice_text, fixed = TRUE)
+      choice_text <- gsub("&gt;", ">", choice_text, fixed = TRUE)
+      choice_text <- gsub("&amp;", "&", choice_text, fixed = TRUE)
+      choice_text <- gsub("&quot;", "\"", choice_text, fixed = TRUE)
+
       presentation <- c(presentation,
         paste0('<response_label ident="', j - 1L, '">'),
         '<material>',
-        ## FIX: Remove double-escaping here to stop &lt; from showing up
-        paste0('<mattext><![CDATA[', choices[j], ']]></mattext>'),
+        paste0('<mattext><![CDATA[', choice_text, ']]></mattext>'),
         '</material>',
         '</response_label>'
       )
@@ -431,11 +433,18 @@ ilias_gap_xml <- function(type, gap_id, choices, solution, tolerance, points, ma
 
     resprocessing <- unlist(lapply(seq_along(choices), function(j) {
       pts <- if(correct[j]) choice_points else 0
+      
+      ## Matching Un-escape for the scoring engine
+      choice_text <- choices[j]
+      choice_text <- gsub("&lt;", "<", choice_text, fixed = TRUE)
+      choice_text <- gsub("&gt;", ">", choice_text, fixed = TRUE)
+      choice_text <- gsub("&amp;", "&", choice_text, fixed = TRUE)
+      choice_text <- gsub("&quot;", "\"", choice_text, fixed = TRUE)
+
       c(
         '<respcondition continue="Yes">',
         '<conditionvar>',
-        ## FIX: Remove double-escaping here too
-        paste0('<varequal respident="', gap_id, '"><![CDATA[', choices[j], ']]></varequal>'),
+        paste0('<varequal respident="', gap_id, '"><![CDATA[', choice_text, ']]></varequal>'),
         '</conditionvar>',
         paste0('<setvar action="Add">', ilias_format_value(pts), '</setvar>'),
         '</respcondition>'
