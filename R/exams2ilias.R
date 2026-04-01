@@ -116,7 +116,6 @@ exams2ilias <- function(file, n = 1L, nsamp = NULL, dir = ".",
     writeLines(qti_xml, file.path(pkgdir, paste0(name, "_qti.xml")))
     writeLines(make_qpl_xml(name, qrefs, pool_id), file.path(pkgdir, paste0(name, "_qpl.xml")))
 
-    ## Add solution to xml as qtimetadata
     if(metasolution) solution_to_qtimetadata(name, rval, path = workdir)
 
     owd <- getwd()
@@ -132,7 +131,6 @@ exams2ilias <- function(file, n = 1L, nsamp = NULL, dir = ".",
 
   invisible(rval)
 }
-
 
 extract_qti12_items <- function(xml) {
   starts <- grep("^\\s*<item ident=", xml)
@@ -155,7 +153,6 @@ extract_qti12_items <- function(xml) {
   rval
 }
 
-
 ilias_flatten_exams <- function(exm) {
   rval <- list()
   k <- 1L
@@ -168,11 +165,9 @@ ilias_flatten_exams <- function(exm) {
   rval
 }
 
-
 ilias_extract_item_title <- function(item_xml) {
   sub('^\\s*<item ident="[^"]+" title="([^"]*)".*$', "\\1", item_xml[1L])
 }
-
 
 ilias_question_type <- function(type) {
   switch(type,
@@ -185,31 +180,26 @@ ilias_question_type <- function(type) {
   )
 }
 
-
 ilias_escape_text <- function(x) {
   x <- gsub("&", "&amp;", x, fixed = TRUE)
   x <- gsub("<", "&lt;", x, fixed = TRUE)
   gsub(">", "&gt;", x, fixed = TRUE)
 }
 
-
 ilias_escape_attribute <- function(x) {
   x <- ilias_escape_text(x)
   gsub('"', "&quot;", x, fixed = TRUE)
 }
 
-
 ilias_format_value <- function(x) {
   trimws(format(x, scientific = FALSE, trim = TRUE))
 }
-
 
 ilias_item_header <- function(id, title, maxattempts = NULL) {
   attr <- if(is.null(maxattempts)) "" else paste0(" ", maxattempts)
   paste0('<item ident="', ilias_escape_attribute(id),
     '" title="', ilias_escape_attribute(title), '"', attr, '>')
 }
-
 
 ilias_item_metadata <- function(questiontype, ilias_version = "9.17.0",
   author = "R/exams", textgaprating = "ci", include_author = TRUE,
@@ -258,17 +248,14 @@ ilias_item_metadata <- function(questiontype, ilias_version = "9.17.0",
   xml
 }
 
-
 ilias_item_maxattempts <- function(item_xml) {
   x <- regmatches(item_xml[1L], regexpr('maxattempts="[^"]+"', item_xml[1L]))
   if(length(x) < 1L || identical(x, character(0L))) NULL else x
 }
 
-
 ilias_bare_qid <- function(qref) {
   sub("^.*_qst_([0-9]+)$", "\\1", qref)
 }
-
 
 ilias_itemfeedback <- function(item_xml) {
   start <- grep("^\\s*<itemfeedback", item_xml)
@@ -276,7 +263,6 @@ ilias_itemfeedback <- function(item_xml) {
   if(length(start) < 1L || length(end) < 1L) return(NULL)
   item_xml[min(start):max(end)]
 }
-
 
 patch_item_ilias <- function(item_xml, item_id, title, questiontype, maxattempts = 0) {
   meta_start <- grep("^\\s*<itemmetadata>\\s*$", item_xml)
@@ -297,7 +283,6 @@ patch_item_ilias <- function(item_xml, item_id, title, questiontype, maxattempts
 
   rval
 }
-
 
 ilias_questionlist <- function(x) {
   questionlist <- if(!is.list(x$questionlist)) {
@@ -322,7 +307,6 @@ ilias_questionlist <- function(x) {
   questionlist
 }
 
-
 ilias_maxchars <- function(x, n, maxchars = 12) {
   rval <- if(is.null(x$metainfo$maxchars)) {
     if(length(maxchars) < 2L) c(maxchars, NA, NA) else maxchars[1:3]
@@ -336,7 +320,6 @@ ilias_maxchars <- function(x, n, maxchars = 12) {
   rval
 }
 
-
 ilias_choice_solution <- function(solution) {
   if(is.logical(solution)) return(solution)
   if(is.character(solution) && length(solution) == 1L && grepl("^[01]+$", solution)) {
@@ -345,7 +328,7 @@ ilias_choice_solution <- function(solution) {
   as.logical(solution)
 }
 
-
+## FIX: Use CDATA instead of HTML escaping to preserve paragraph/list layout!
 ilias_material <- function(text, keep_whitespace = FALSE) {
   if(is.null(text) || anyNA(text)) return(NULL)
   text <- paste(text, collapse = "\n")
@@ -353,11 +336,10 @@ ilias_material <- function(text, keep_whitespace = FALSE) {
   if(keep_whitespace && identical(text, "")) return(NULL)
   c(
     '<material>',
-    paste0('<mattext texttype="text/xhtml">', ilias_escape_text(text), '</mattext>'),
+    paste0('<mattext texttype="text/html"><![CDATA[', text, ']]></mattext>'),
     '</material>'
   )
 }
-
 
 ilias_gap_xml <- function(type, gap_id, choices, solution, tolerance, points, maxchars) {
   if(type %in% c("essay", "file", "verbatim")) {
@@ -377,7 +359,7 @@ ilias_gap_xml <- function(type, gap_id, choices, solution, tolerance, points, ma
       c(
         '<respcondition continue="Yes">',
         '<conditionvar>',
-        paste0('<varequal respident="', gap_id, '">', ilias_escape_text(sol), '</varequal>'),
+        paste0('<varequal respident="', gap_id, '"><![CDATA[', sol, ']]></varequal>'),
         '</conditionvar>',
         paste0('<setvar action="Add">', ilias_format_value(points), '</setvar>'),
         '</respcondition>'
@@ -422,7 +404,6 @@ ilias_gap_xml <- function(type, gap_id, choices, solution, tolerance, points, ma
     return(list(presentation = presentation, resprocessing = resprocessing))
   }
 
-  ## FIX A: String Crash Firewall
   if(type %in% c("schoice", "mchoice")) {
     if(!length(choices)) choices <- as.character(seq_along(solution))
     correct <- ilias_choice_solution(solution)
@@ -440,8 +421,8 @@ ilias_gap_xml <- function(type, gap_id, choices, solution, tolerance, points, ma
       presentation <- c(presentation,
         paste0('<response_label ident="', j - 1L, '">'),
         '<material>',
-        ## FIX C: CDATA Shield for HTML Symbols
-        paste0('<mattext><![CDATA[', ilias_escape_text(choices[j]), ']]></mattext>'),
+        ## FIX: Remove double-escaping here to stop &lt; from showing up
+        paste0('<mattext><![CDATA[', choices[j], ']]></mattext>'),
         '</material>',
         '</response_label>'
       )
@@ -453,8 +434,8 @@ ilias_gap_xml <- function(type, gap_id, choices, solution, tolerance, points, ma
       c(
         '<respcondition continue="Yes">',
         '<conditionvar>',
-        ## FIX C: CDATA Shield applied to the resprocessing logic as well
-        paste0('<varequal respident="', gap_id, '"><![CDATA[', ilias_escape_text(choices[j]), ']]></varequal>'),
+        ## FIX: Remove double-escaping here too
+        paste0('<varequal respident="', gap_id, '"><![CDATA[', choices[j], ']]></varequal>'),
         '</conditionvar>',
         paste0('<setvar action="Add">', ilias_format_value(pts), '</setvar>'),
         '</respcondition>'
@@ -463,17 +444,14 @@ ilias_gap_xml <- function(type, gap_id, choices, solution, tolerance, points, ma
 
     return(list(presentation = presentation, resprocessing = resprocessing))
   } else {
-    ## Fail-safe for completely unknown gap types
     return(list(presentation = character(0), resprocessing = character(0)))
   }
 }
-
 
 make_item_ilias_cloze <- function(item_xml, x, item_id, title, maxattempts = 0) {
   solution <- if(!is.list(x$metainfo$solution)) list(x$metainfo$solution) else x$metainfo$solution
   n <- length(solution)
   
-  ## FIX B: The Padding Bug (Solution list dynamically expanded)
   if(length(x$solutionlist) < n) {
     x$solutionlist <- c(x$solutionlist, as.list(rep(NA, n - length(x$solutionlist))))
   }
@@ -485,7 +463,6 @@ make_item_ilias_cloze <- function(item_xml, x, item_id, title, maxattempts = 0) 
   questionlist <- ilias_questionlist(x)
   if(is.null(questionlist)) questionlist <- vector("list", n)
   
-  ## FIX B (continued): Ensure questionlist strictly matches total gap count
   if(length(questionlist) < n) {
     questionlist <- c(questionlist, vector("list", n - length(questionlist)))
   }
@@ -556,13 +533,11 @@ make_item_ilias_cloze <- function(item_xml, x, item_id, title, maxattempts = 0) 
   )
 }
 
-
 ilias_collapse_xml <- function(xml, xmlcollapse) {
   if(identical(xmlcollapse, FALSE)) return(xml)
   collapse <- if(identical(xmlcollapse, TRUE)) " " else as.character(xmlcollapse)
   paste(xml, collapse = collapse)
 }
-
 
 make_qpl_xml <- function(name, qrefs, pool_id = paste0(name, "_qpl")) {
   xml <- c(
@@ -606,28 +581,16 @@ make_qpl_xml <- function(name, qrefs, pool_id = paste0(name, "_qpl")) {
   c(xml, '</QuestionSkillAssignments>', '</ContentObject>')
 }
 
-
-# In order for an ILIAS test to recognize a solution to an essay question, the
-# solution needs to be included in the xml as a qtimetadata tag.
 solution_to_qtimetadata <- function(name, exm, path = ".") {
   xml <- readLines(file.path(path, name, paste0(name, "_qti.xml")), warn = FALSE)
 
   for(i in seq_along(exm)) {
-    ## Where to append qtimetadata?
     idx <- (grep("QUESTIONTYPE", xml) + 2)[i]
-
-    ## Get solution, FIXME: exm[[i]] may have more than a single question
     solustr <- paste(exm[[i]][[1]]$solution, collapse = "\n")
-
-    ## Split into several solustr by ol/ul li items
     if(exm[[i]][[1]]$solution[1] %in% c("<ol>", "<ul>")) {
       solustr <- gsub("</li>.*", "", strsplit(solustr, "<li>")[[1]])[-1]
     }
-
-    ## Encode solution
     solustr <- solustr_to_phpstruct(solustr, length(solustr))
-
-    ## Append solution
     xml <- append(xml,
       c("<qtimetadatafield>",
         paste0("<fieldlabel>termscoring</fieldlabel><fieldentry>",
@@ -642,10 +605,6 @@ solution_to_qtimetadata <- function(name, exm, path = ".") {
   writeLines(xml, file.path(path, name, paste0(name, "_qti.xml")))
 }
 
-
-# And the solution needs to be wrapped in some php data structure,
-# https://github.com/ILIAS-eLearning/ILIAS/blob/release_5-4/Modules/TestQuestionPool/classes/class.assAnswerMultipleResponseImage.php
-# and be base encoded.
 solustr_to_phpstruct <- function(solustr, nitems, encode = TRUE){
   items <- raw(0)
   for(i in seq_len(nitems)){
